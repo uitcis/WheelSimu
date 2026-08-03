@@ -20,13 +20,11 @@ obj/
 .DS_Store
 Thumbs.db
 
-# Logs
+# Logs & temp text files
 *.txt
-!android_home.txt
-!yes_input.txt
 
-# Server build output
+# SourceSafe legacy
+vssver.scc
+
+# Server build
 WheelSimuServer/WheelSimuServer.csproj.user
-
-# Temporary
-server_decompiled/
