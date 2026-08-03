@@ -643,8 +643,7 @@ namespace WheelSimu
             {
                 RunOnUiThread(() => textView2.Text = ex.Message);
                 RunOnUiThread(() => textView3.Text =
-                $"Local IP={IPData[1].IP}:{IPData[1].Port}\r\n" +
-                $"RemoteIP={IPData[0].IP}:{IPData[0].Port}");
+                $"Remote={IPData[0].IP}:{IPData[0].Port}  Local={IPData[1].IP}:{IPData[1].Port}");
                 RunOnUiThread(() => btnConnect.Enabled = true);
                 TryTimes += 1;
 

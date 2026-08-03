@@ -9,6 +9,7 @@
     <ApplicationDisplayVersion>20.11.01.02</ApplicationDisplayVersion>
     <SupportedOSPlatformVersion>23</SupportedOSPlatformVersion>
     <Nullable>disable</Nullable>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <!-- Debug: 禁用AOT(使用解释器)以排查崩溃 -->
     <RunAOTCompilation>false</RunAOTCompilation>
     <AndroidPackageFormat>apk</AndroidPackageFormat>

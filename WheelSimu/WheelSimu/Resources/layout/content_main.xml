@@ -41,6 +41,24 @@
             android:textSize="14sp"
             android:textStyle="bold"
             android:letterSpacing="0.1" />
+        <!-- 状态文字 — 与标题同一行 -->
+        <TextView
+            android:id="@+id/textView3"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1.5"
+            android:text="A=0 B=0 T=0 C=0 HB=OFF"
+            android:textColor="#99808890"
+            android:textSize="9sp"
+            android:fontFamily="monospace"
+            android:singleLine="true"
+            android:ellipsize="marquee"
+            android:marqueeRepeatLimit="marquee_forever"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:scrollHorizontally="true"
+            android:gravity="end"
+            android:layout_marginEnd="4dp" />
         <EditText
             android:id="@+id/IPText1"
             android:layout_width="130dp"
@@ -211,17 +229,6 @@
             android:layout_weight="1"
             android:orientation="vertical"
             android:gravity="center">
-
-            <!-- 数据文字 -->
-            <TextView
-                android:id="@+id/textView3"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="A=0 B=0 T=0 C=0 HB=OFF"
-                android:textColor="#99808890"
-                android:textSize="11sp"
-                android:fontFamily="monospace"
-                android:layout_marginBottom="4dp" />
 
             <!-- 方向盘 FrameLayout 容器 (代码中add SteeringWheelView到这里) -->
             <FrameLayout

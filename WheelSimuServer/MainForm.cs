@@ -104,7 +104,7 @@ public partial class MainForm : Form
         {
             Text = "  WheelSimu Server v2 — 方向盘手机模拟器  ",
             ForeColor = Color.White,
-            Font = new Font("Microsoft YaHei UI", 11f, FontStyle.Bold),
+            Font = new Font("Segoe UI", 11f, FontStyle.Bold),
             AutoSize = true,
             Location = new Point(12, 9)
         };
