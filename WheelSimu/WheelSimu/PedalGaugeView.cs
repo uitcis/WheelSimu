@@ -12,6 +12,7 @@ namespace WheelSimu
     public class PedalGaugeView : View
     {
         private float _progress; // 0-100
+        private string _label = "";   // 右侧标签文字（油门/刹车/离合）
 
         // 颜色
         private int _fillColor1, _fillColor2, _labelColor;
@@ -22,8 +23,9 @@ namespace WheelSimu
         private Paint _fillPaint;
         private Paint _shinePaint;
         private Paint _thumbPaint;
-        private Paint _textPaint;
         private Paint _borderPaint;
+        private Paint _pctPaint;       // 圆点内百分比
+        private Paint _labelPaint;     // 右侧竖排标签
 
         private RectF _drawRect;
 
@@ -53,6 +55,13 @@ namespace WheelSimu
             _fillColor1 = fillColor1;
             _fillColor2 = fillColor2;
             _labelColor = labelColor;
+            Invalidate();
+        }
+
+        /// <summary>设置右侧列显示的标签文字</summary>
+        public void SetLabel(string text)
+        {
+            _label = text ?? "";
             Invalidate();
         }
 
@@ -86,11 +95,21 @@ namespace WheelSimu
             _thumbPaint.SetStyle(Paint.Style.FillAndStroke);
             _thumbPaint.StrokeWidth = 2f;
 
-            // 百分比文字
-            _textPaint = new Paint
+            // 百分比文字（滑块圆点内）
+            _pctPaint = new Paint
             {
                 AntiAlias = true,
-                TextSize = 30f,
+                TextSize = 28f,
+                TextAlign = Paint.Align.Center,
+                FakeBoldText = true,
+                Color = Color.Argb(255, 255, 255, 255),
+            };
+
+            // 标签文字（右侧列竖排大字）
+            _labelPaint = new Paint
+            {
+                AntiAlias = true,
+                TextSize = 34f,
                 TextAlign = Paint.Align.Center,
                 FakeBoldText = true,
             };
@@ -128,15 +147,22 @@ namespace WheelSimu
 
             if (w <= 0 || h <= 0) return;
 
+            // 两列布局：左列刻度条占 70%，右列文字占 30%
+            float barW = w * 0.68f;
+            float textW = w - barW;
+            float barRight = left + barW;
+            float textCenterX = barRight + textW / 2f;
+
             float fillH = h * _progress / 100f;
             float fillTop = top + h - fillH;
 
-            // --- 背景 ---
+            // --- 刻度条背景 ---
+            var barRect = new RectF(left, top, barRight, top + h);
             var bgGrad = new LinearGradient(0, top, 0, top + h,
                 new int[] { Color.Argb(255, 16, 20, 28).ToArgb(), Color.Argb(255, 8, 10, 14).ToArgb() },
                 null, Shader.TileMode.Clamp);
             _bgPaint.SetShader(bgGrad);
-            canvas.DrawRoundRect(_drawRect, 8f, 8f, _bgPaint);
+            canvas.DrawRoundRect(barRect, 8f, 8f, _bgPaint);
             _bgPaint.SetShader(null);
 
             // --- 刻度线 ---
@@ -150,13 +176,13 @@ namespace WheelSimu
             for (int i = 25; i < 100; i += 25)
             {
                 float y = top + h - (h * i / 100f);
-                canvas.DrawLine(left + 8, y, left + w - 8, y, tickPaint);
+                canvas.DrawLine(left + 8, y, barRight - 8, y, tickPaint);
             }
 
             // --- 彩色填充 ---
             if (fillH > 0)
             {
-                var fillRect = new RectF(left + 1, fillTop, left + w - 1, top + h - 1);
+                var fillRect = new RectF(left + 1, fillTop, barRight - 1, top + h - 1);
                 var fillGrad = new LinearGradient(0, fillTop, 0, top + h,
                     new int[] { _fillColor1, _fillColor2 },
                     new float[] { 0f, 1f },
@@ -168,34 +194,60 @@ namespace WheelSimu
                 // 填充顶部亮线
                 _shinePaint.Color = new Color(_accentColor);
                 _shinePaint.Alpha = 200;
-                canvas.DrawLine(left + 3, fillTop, left + w - 3, fillTop, _shinePaint);
+                canvas.DrawLine(left + 3, fillTop, barRight - 3, fillTop, _shinePaint);
             }
 
-            // --- 滑块圆点 ---
-            float thumbR = w * 0.28f;
-            float thumbY = fillTop;
-            _thumbPaint.Color = new Color(245, 245, 255);
-            _thumbPaint.SetShadowLayer(6f, 0, 2f, Color.Argb(100, 0, 0, 0));
-            canvas.DrawCircle(left + w / 2f, thumbY, thumbR, _thumbPaint);
+            // --- 滑块长方形（横跨刻度条） ---
+            float thumbH = barW * 0.16f;          // 滑块高度
+            float thumbW = barW * 0.55f;          // 滑块宽度
+            float thumbY = fillTop - thumbH / 2f;  // 中心对齐填充顶部
+            float thumbL = left + (barW - thumbW) / 2f;
+            float thumbR_rect = thumbL + thumbW;
+            float thumbB = thumbY + thumbH;
+            var thumbRect = new RectF(thumbL, thumbY, thumbR_rect, thumbB);
 
-            // 滑块内圈
+            _thumbPaint.Color = new Color(245, 245, 255);
+            _thumbPaint.SetStyle(Paint.Style.Fill);
+            _thumbPaint.SetShadowLayer(4f, 0, 2f, Color.Argb(100, 0, 0, 0));
+            canvas.DrawRoundRect(thumbRect, 4f, 4f, _thumbPaint);
+
+            // 滑块内部颜色条
             var thumbInner = new Paint { AntiAlias = true };
             thumbInner.SetStyle(Paint.Style.Fill);
             thumbInner.Color = new Color(_accentColor);
-            canvas.DrawCircle(left + w / 2f, thumbY, thumbR * 0.5f, thumbInner);
+            float innerPad = 3f;
+            var innerRect = new RectF(thumbL + innerPad, thumbY + innerPad, thumbR_rect - innerPad, thumbB - innerPad);
+            canvas.DrawRoundRect(innerRect, 2f, 2f, thumbInner);
 
-            // --- 边框 ---
-            canvas.DrawRoundRect(_drawRect, 8f, 8f, _borderPaint);
+            // --- 刻度条边框 ---
+            canvas.DrawRoundRect(barRect, 8f, 8f, _borderPaint);
 
-            // --- 百分比文字 ---
-            _textPaint.Color = new Color(_labelColor);
-            float textX = left + w / 2f;
-            float textY = top + h / 2f + 10f;
+            // --- 百分比文字（刻度条内底部，白色） ---
+            _pctPaint.Color = Color.Argb(255, 255, 255, 255);
+            _pctPaint.SetShadowLayer(2f, 0, 1f, Color.Argb(180, 0, 0, 0));
+            float pctX = left + barW / 2f;
+            float pctY = top + h - _pctPaint.TextSize * 0.6f;
+            canvas.DrawText($"{_progress:F0}", pctX, pctY, _pctPaint);
+            _pctPaint.SetShadowLayer(0, 0, 0, Color.Transparent);
 
-            // 文字背景阴影
-            _textPaint.SetShadowLayer(4f, 0, 1f, Color.Argb(180, 0, 0, 0));
-            canvas.DrawText($"{_progress:F0}%", textX, textY, _textPaint);
-            _textPaint.SetShadowLayer(0, 0, 0, Color.Transparent);
+            // --- 标签文字（右侧列，竖排居中） ---
+            if (!string.IsNullOrEmpty(_label))
+            {
+                _labelPaint.Color = new Color(_labelColor);
+                _labelPaint.SetShadowLayer(4f, 0, 1f, Color.Argb(180, 0, 0, 0));
+
+                // 测量标签总高度
+                float labelH = _labelPaint.Descent() - _labelPaint.Ascent();
+                float totalH = labelH * _label.Length;
+                float startY = top + (h - totalH) / 2f - _labelPaint.Ascent();
+
+                for (int i = 0; i < _label.Length; i++)
+                {
+                    float cy = startY + labelH * i;
+                    canvas.DrawText(_label[i].ToString(), textCenterX, cy, _labelPaint);
+                }
+                _labelPaint.SetShadowLayer(0, 0, 0, Color.Transparent);
+            }
         }
 
         public override bool OnTouchEvent(MotionEvent e)

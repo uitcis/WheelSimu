@@ -446,6 +446,7 @@ public partial class MainForm : Form
 
         try
         {
+            client.NoDelay = true; // 禁用 Nagle，降低延迟
             using var stream = client.GetStream();
             stream.ReadTimeout = 3000;
             var buffer = new byte[512];
@@ -473,11 +474,7 @@ public partial class MainForm : Form
                     string msg = leftover.Substring(0, atIdx);
                     leftover = leftover.Substring(atIdx + 1);
                     ProcessMessage(msg);
-
-                    string ack = "OK:FF=0,CC=0@";
-                    byte[] ackBytes = Encoding.UTF8.GetBytes(ack);
-                    try { await stream.WriteAsync(ackBytes, 0, ackBytes.Length, ct); }
-                    catch { break; }
+                    // 客户端不处理 ACK，已移除（节省 100 次/秒无用的网络写入）
                 }
 
                 if (leftover.Length > 4096) leftover = "";
@@ -495,7 +492,7 @@ public partial class MainForm : Form
         }
     }
 
-    // ==================== 消息解析 ====================
+    // ==================== 消息解析（手动单遍解析，零分配） ====================
     void ProcessMessage(string msg)
     {
         Interlocked.Increment(ref msgCount);
@@ -504,26 +501,42 @@ public partial class MainForm : Form
         int throttle = 0, brake = 0, clutch = 0, handbrake = 0;
         int gearUp = 0, gearDown = 0;
 
-        var parts = msg.Split(',');
-        foreach (var part in parts)
+        int len = msg.Length, pos = 0;
+        while (pos < len)
         {
-            int eqIdx = part.IndexOf('=');
-            if (eqIdx < 0) continue;
-            string key = part.Substring(0, eqIdx);
-            string valStr = part.Substring(eqIdx + 1);
+            // 找 '='
+            int eq = pos;
+            while (eq < len && msg[eq] != '=') eq++;
+            if (eq >= len) break;
 
-            switch (key)
+            // 找值结束（',' 或字符串末尾）
+            int valEnd = eq + 1;
+            while (valEnd < len && msg[valEnd] != ',') valEnd++;
+
+            // 根据首字符+长度匹配键名（避免 Substring 分配）
+            int keyLen = eq - pos;
+            switch (msg[pos])
             {
-                case "A": double.TryParse(valStr, out angle); break;
-                case "T": int.TryParse(valStr, out throttle); break;
-                case "B": int.TryParse(valStr, out brake); break;
-                case "C": int.TryParse(valStr, out clutch); break;
-                case "H": int.TryParse(valStr, out handbrake); break;
-                case "Gu": int.TryParse(valStr, out gearUp); break;
-                case "Gd": int.TryParse(valStr, out gearDown); break;
+                case 'A': if (keyLen == 1) ParseDouble(msg, eq + 1, valEnd, out angle); break;
+                case 'T': if (keyLen == 1) ParseInt(msg, eq + 1, valEnd, out throttle); break;
+                case 'B': if (keyLen == 1) ParseInt(msg, eq + 1, valEnd, out brake); break;
+                case 'C': if (keyLen == 1) ParseInt(msg, eq + 1, valEnd, out clutch); break;
+                case 'H': if (keyLen == 1) ParseInt(msg, eq + 1, valEnd, out handbrake); break;
+                case 'G':
+                    if (keyLen == 1) { /* G=xxx 跳过 */ }
+                    else if (keyLen == 2)
+                    {
+                        char ch2 = msg[pos + 1];
+                        if (ch2 == 'u') ParseInt(msg, eq + 1, valEnd, out gearUp);
+                        else if (ch2 == 'd') ParseInt(msg, eq + 1, valEnd, out gearDown);
+                    }
+                    break;
             }
+
+            pos = valEnd + 1; // 跳过 ','
         }
 
+        // 日志节流 + 状态栏更新（每 ~1s）
         var now = DateTime.Now;
         if ((now - lastDataLog).TotalSeconds >= 1.0)
         {
@@ -535,6 +548,42 @@ public partial class MainForm : Form
 
         if (vJoyReady)
             UpdateVJoy(angle, throttle, brake, clutch, handbrake, gearUp, gearDown);
+    }
+
+    /// <summary>从字符串的子区间直接解析 int，不创建 Substring</summary>
+    static void ParseInt(string s, int start, int end, out int result)
+    {
+        result = 0;
+        bool neg = false;
+        if (start < end && s[start] == '-') { neg = true; start++; }
+        while (start < end) { result = result * 10 + (s[start++] - '0'); }
+        if (neg) result = -result;
+    }
+
+    /// <summary>从字符串的子区间直接解析 double，不创建 Substring</summary>
+    static void ParseDouble(string s, int start, int end, out double result)
+    {
+        result = 0;
+        bool neg = false;
+        if (start < end && s[start] == '-') { neg = true; start++; }
+        // 整数部分
+        while (start < end && s[start] != '.')
+        {
+            result = result * 10 + (s[start++] - '0');
+        }
+        // 小数部分
+        if (start < end && s[start] == '.')
+        {
+            start++;
+            double frac = 0, div = 0.1;
+            while (start < end)
+            {
+                frac += (s[start++] - '0') * div;
+                div *= 0.1;
+            }
+            result += frac;
+        }
+        if (neg) result = -result;
     }
 
     // ==================== 更新 vJoy ====================
