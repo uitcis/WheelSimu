@@ -121,7 +121,8 @@ public partial class MainForm : Form
             Font = new Font("Consolas", 9f),
             BorderStyle = BorderStyle.None,
             WordWrap = true,
-            DetectUrls = false
+            DetectUrls = false,
+            ShortcutsEnabled = false
         };
         Controls.Add(rtbLogs);
 
@@ -316,7 +317,7 @@ public partial class MainForm : Form
         }
 
         var line = $"[{DateTime.Now:HH:mm:ss}] {msg}";
-        rtbLogs.AppendText(line + "\n");
+        rtbLogs.AppendText(line + Environment.NewLine);
 
         // 限制行数
         if (rtbLogs.Lines.Length > MAX_LOG_LINES)
