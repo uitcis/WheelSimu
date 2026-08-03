@@ -68,6 +68,7 @@ public partial class MainForm : Form
     ToolStripStatusLabel lblClient = null!;
     ToolStripStatusLabel lblMsgCount = null!;
     NotifyIcon trayIcon = null!;
+    Label lblData = null!;  // 固定行显示实时数据
 
     // ==================== 构造函数 ====================
     public MainForm(string[] args)
@@ -112,6 +113,8 @@ public partial class MainForm : Form
         Controls.Add(pnlTop);
 
         // === 日志区域 ===
+        var pnlMain = new Panel { Dock = DockStyle.Fill };
+
         rtbLogs = new RichTextBox
         {
             Dock = DockStyle.Fill,
@@ -122,9 +125,26 @@ public partial class MainForm : Form
             BorderStyle = BorderStyle.None,
             WordWrap = true,
             DetectUrls = false,
-            ShortcutsEnabled = false
+            ShortcutsEnabled = false,
         };
-        Controls.Add(rtbLogs);
+        pnlMain.Controls.Add(rtbLogs);
+
+        // === 底部固定数据行 ===
+        lblData = new Label
+        {
+            Text = "等待客户端数据...",
+            Dock = DockStyle.Bottom,
+            BackColor = Color.FromArgb(40, 40, 40),
+            ForeColor = Color.FromArgb(100, 200, 255),
+            Font = new Font("Consolas", 10f, FontStyle.Bold),
+            AutoSize = false,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(8, 0, 0, 0),
+            Height = 24,
+        };
+        pnlMain.Controls.Add(lblData);
+
+        Controls.Add(pnlMain);
 
         // === 底部状态栏 ===
         statusBar = new StatusStrip
@@ -537,13 +557,14 @@ public partial class MainForm : Form
             pos = valEnd + 1; // 跳过 ','
         }
 
-        // 日志节流 + 状态栏更新（每 ~1s）
+        // 日志节流 + 状态栏更新 + 数据行刷新（每 ~1s）
         var now = DateTime.Now;
         if ((now - lastDataLog).TotalSeconds >= 1.0)
         {
             lastDataLog = now;
             string tag = vJoyReady ? "vJoy" : "收";
-            Log($"[{tag} #{msgCount}] A={angle:F1} T={throttle} B={brake} C={clutch} HB={handbrake} Gu={gearUp} Gd={gearDown}");
+            string dataLine = $"[{tag} #{msgCount}] A={angle:F1} T={throttle} B={brake} C={clutch} HB={handbrake} Gu={gearUp} Gd={gearDown}";
+            BeginInvoke(() => lblData.Text = dataLine);
             UpdateStatusUI();
         }
 
