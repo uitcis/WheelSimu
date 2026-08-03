@@ -1,0 +1,32 @@
+# Build outputs
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.dll
+*.pdb
+*.exe.config
+# *.apk  (Release 目录下的发布文件保留)
+
+# IDE
+.idea/
+.vs/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.txt
+!android_home.txt
+!yes_input.txt
+
+# Server build output
+WheelSimuServer/WheelSimuServer.csproj.user
+
+# Temporary
+server_decompiled/

@@ -1,16 +1,20 @@
 ﻿using System;
+using System.IO;
+using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using Android.App;
 using Android.OS;
-using Android.Support.V7.App;
+using Android.Runtime;
+using Android.Content;
+using AndroidX.AppCompat.App;
 using Android.Views;
 using Android.Widget;
 using Android.Hardware;
 using Android.Net.Wifi;
-using Xamarin.Essentials;
 
 namespace WheelSimu
 {
@@ -35,8 +39,6 @@ namespace WheelSimu
 
         EditText IPText;
         Button btnConnect;
-        Button Throttle;
-        Button Brake;
         Button btnSet;
         Button btnReset;
         Button btnSetSrd;
@@ -44,13 +46,23 @@ namespace WheelSimu
         Button btnGearUp;
         Button btnGearDown;
         Button btnClearAngle;
-#pragma warning disable CS0618 // Type or member is obsolete
-        SlidingDrawer sldBrake;
-        SlidingDrawer sldThrottle;
-#pragma warning restore CS0618 // Type or member is obsolete
-        LinearLayout cntBrake;
-        LinearLayout cntThrottle;
+        Button btnNetMode;
         Switch SteerEnableSwitch;
+        ToggleButton HandbrakeSwitch;
+        SteeringWheelView steeringWheel;
+
+        /// <summary>连接模式: 0=TCP, 1=UDP, 2=蓝牙</summary>
+        private int mConnectMode = 0;
+
+        // 踏板垂直进度条
+        PedalGaugeView gaugeThrottle;
+        PedalGaugeView gaugeBrake;
+        PedalGaugeView gaugeClutch;
+
+        // 踏板百分比显示
+        TextView tvThrottleVal;
+        TextView tvBrakeVal;
+        TextView tvClutchVal;
 
         //ImageView iviewCoordinate;
 
@@ -65,6 +77,8 @@ namespace WheelSimu
         public int TryTimes = 1;
         int sThrottle = 0;
         int sBrake = 0;
+        int sClutch = 0;
+        int sHandbrake = 0;
         double sAngle = 0;
         int sSet = 0;
         int sSetSR = 0;
@@ -75,7 +89,6 @@ namespace WheelSimu
         bool IsConnected = false;
 
         //Sensor
-        readonly SensorSpeed Speed = SensorSpeed.UI;
         string AccelerometerData1;
         string AccelerometerData2;
         double AcX1, AcY1, AcZ1;
@@ -83,19 +96,56 @@ namespace WheelSimu
         double TmpX = 0;
         double Hp = 0; //Hemisphere 方向盘大于+-90度的情况
         double OffSet = 0; //偏移补偿
-        readonly double gAngle = 90 / 9.8; //一单位g值对应角度
+        readonly double gAngle = 90 / 9.8; //一单位g值对应角度
+        private readonly object sensorLock = new object();
+
         private SensorManager mSensorManager;
         //SensorMode = 0 Xamarin ; 1 android.Hardware ; 2,3 混合模式
         readonly int SensorMode = 1;
+
+        // 定时器替代忙等轮询
+        private System.Threading.Timer sendTimer;
+        private readonly int sendIntervalMs = 10; // 100Hz 发送频率，可根据需要调整
+        private volatile bool steerEnabled = false;
+
+        // UDP 服务自动发现
+        const int DISCOVERY_PORT = 5051;
+        const string DISCOVERY_MAGIC = "WHEELSIMU_SERVER";
+        private CancellationTokenSource mDiscoverCts;
+        private volatile string mDiscoveredServer = null;
+
+        // 自动重连
+        private volatile bool mAutoReconnect = true;
 
         //vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv全局参数声明vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
 
 
         protected override void OnCreate(Bundle savedInstanceState)
         {
-            base.OnCreate(savedInstanceState);
-            Xamarin.Essentials.Platform.Init(this, savedInstanceState);
-            SetContentView(Resource.Layout.activity_main);
+            // 全局未处理异常捕获
+            AndroidEnvironment.UnhandledExceptionRaiser += (s, e) =>
+            {
+                try
+                {
+                    var log = $"[{DateTime.Now}] Crash: {e.Exception}";
+                    File.WriteAllText(Path.Combine(CacheDir.AbsolutePath, "crash.log"), log);
+                }
+                catch { }
+            };
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                try
+                {
+                    var log = $"[{DateTime.Now}] AppDomain Crash: {((Exception)e.ExceptionObject)}";
+                    File.WriteAllText(Path.Combine(CacheDir.AbsolutePath, "crash.log"), log);
+                }
+                catch { }
+            };
+
+            try
+            {
+                base.OnCreate(savedInstanceState);
+                SetContentView(Resource.Layout.activity_main);
 
 
             //保持屏幕常亮
@@ -112,9 +162,13 @@ namespace WheelSimu
             //textView6 = FindViewById<TextView>(Resource.Id.textView6);
             IPText = FindViewById<EditText>(Resource.Id.IPText1);
 
+            // 读取已保存的IP地址
+            var prefs = GetSharedPreferences("WheelSimuPrefs", FileCreationMode.Private);
+            IPText.Text = prefs.GetString("LastIP", "192.168.1.100:5050");
+
             btnConnect = FindViewById<Button>(Resource.Id.Connect);
-            Throttle = FindViewById<Button>(Resource.Id.ThrottleButton);
-            Brake = FindViewById<Button>(Resource.Id.BrakeButton);
+            btnConnect.Text = "重连: 开";  // 初始状态：自动重连开启
+            btnNetMode = FindViewById<Button>(Resource.Id.btnNetMode);
             btnSet = FindViewById<Button>(Resource.Id.btnSet);
             btnReset = FindViewById<Button>(Resource.Id.btnReset);
             btnSetSrd = FindViewById<Button>(Resource.Id.btnSetSrd);
@@ -125,13 +179,52 @@ namespace WheelSimu
             btnGearDown = FindViewById<Button>(Resource.Id.btnGearDown);
             btnClearAngle = FindViewById<Button>(Resource.Id.btnClearAngle);
             SteerEnableSwitch = FindViewById<Switch>(Resource.Id.SteerEnableSwitch);
+            HandbrakeSwitch = FindViewById<ToggleButton>(Resource.Id.HandbrakeSwitch);
 
-#pragma warning disable  CS0618 // Type or member is obsolete
-            sldBrake = FindViewById<SlidingDrawer>(Resource.Id.sldBrake);
-            sldThrottle = FindViewById<SlidingDrawer>(Resource.Id.sldThrottle);
-#pragma warning restore CS0618 // Type or member is obsolete
-            cntBrake = FindViewById<LinearLayout>(Resource.Id.cntBrake);
-            cntThrottle = FindViewById<LinearLayout>(Resource.Id.cntThrottle);
+            // 程序化创建方向盘视图
+            var container = FindViewById<FrameLayout>(Resource.Id.steeringWheelContainer);
+            steeringWheel = new SteeringWheelView(this);
+            container.AddView(steeringWheel, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MatchParent, FrameLayout.LayoutParams.MatchParent));
+
+            // 创建踏板垂直进度条 (油门=绿, 刹车=红, 离合=紫)
+            var gaugeThrottleContainer = FindViewById<FrameLayout>(Resource.Id.gaugeThrottle);
+            gaugeThrottle = new PedalGaugeView(this);
+            gaugeThrottle.SetColors(
+                Android.Graphics.Color.Rgb(56, 142, 60).ToArgb(),   // 绿
+                Android.Graphics.Color.Rgb(27, 94, 32).ToArgb(),
+                Android.Graphics.Color.Rgb(76, 175, 80).ToArgb()
+            );
+            gaugeThrottleContainer.AddView(gaugeThrottle, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MatchParent, FrameLayout.LayoutParams.MatchParent));
+
+            var gaugeBrakeContainer = FindViewById<FrameLayout>(Resource.Id.gaugeBrake);
+            gaugeBrake = new PedalGaugeView(this);
+            gaugeBrake.SetColors(
+                Android.Graphics.Color.Rgb(214, 47, 47).ToArgb(),   // 红
+                Android.Graphics.Color.Rgb(142, 0, 0).ToArgb(),
+                Android.Graphics.Color.Rgb(244, 67, 54).ToArgb()
+            );
+            gaugeBrakeContainer.AddView(gaugeBrake, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MatchParent, FrameLayout.LayoutParams.MatchParent));
+
+            var gaugeClutchContainer = FindViewById<FrameLayout>(Resource.Id.gaugeClutch);
+            gaugeClutch = new PedalGaugeView(this);
+            gaugeClutch.SetColors(
+                Android.Graphics.Color.Rgb(156, 39, 176).ToArgb(),   // 紫
+                Android.Graphics.Color.Rgb(74, 20, 140).ToArgb(),
+                Android.Graphics.Color.Rgb(171, 71, 188).ToArgb()
+            );
+            gaugeClutchContainer.AddView(gaugeClutch, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MatchParent, FrameLayout.LayoutParams.MatchParent));
+
+            // 油门↔刹车互斥：上调一个自动归零另一个
+            gaugeThrottle.LinkedPedal = gaugeBrake;
+            gaugeBrake.LinkedPedal = gaugeThrottle;
+
+            tvThrottleVal = FindViewById<TextView>(Resource.Id.tvThrottleVal);
+            tvBrakeVal = FindViewById<TextView>(Resource.Id.tvBrakeVal);
+            tvClutchVal = FindViewById<TextView>(Resource.Id.tvClutchVal);
 
             RunOnUiThread(() => textView1.Text = "");
             RunOnUiThread(() => textView2.Text = "");
@@ -139,8 +232,7 @@ namespace WheelSimu
             RunOnUiThread(() => textView4.Text = "");
             RunOnUiThread(() => textView5.Text = "");
 
-            btnGearDown.Text = "<<<<<-DOWN-<<<<<";
-            btnGearUp.Text = ">>>>>- UP ->>>>>";
+            // 使用 XML 中定义的中文文字
             textView_Ver.Text = PackageManager.GetPackageInfo(this.PackageName, 0).VersionName;
             //vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv控件实例化vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
 
@@ -150,6 +242,11 @@ namespace WheelSimu
             btnConnect.Click += delegate
             {
                 ThreadPool.QueueUserWorkItem(o => BtnConnect_OnClick());
+            };
+
+            btnNetMode.Click += delegate
+            {
+                BtnNetMode_OnClick();
             };
 
             btnClearAngle.Click += delegate
@@ -162,10 +259,6 @@ namespace WheelSimu
                 ThreadPool.QueueUserWorkItem(o => SteerEnableSwitch_OnClick());
             };
 
-            //Sensor
-            Accelerometer.ReadingChanged += Accelerometer_ReadingChanged;
-
-
             //vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv事件接口设置vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
 
 
@@ -174,12 +267,68 @@ namespace WheelSimu
 
             //vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv其他事件委托vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
 
+            // 启动 UDP 服务发现（后台监听广播）
+            StartDiscovery();
 
+            // 启动后自动尝试连接（延迟 1.5s 等 WiFi 就绪，优先用发现的服务器）
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                Thread.Sleep(1500);
+                // 等待 UDP 发现 3 秒
+                var waited = 0;
+                while (mDiscoveredServer == null && waited < 3000)
+                {
+                    Thread.Sleep(500);
+                    waited += 500;
+                }
 
+                // 优先使用发现的服务器
+                if (mDiscoveredServer != null)
+                {
+                    RunOnUiThread(() => IPText.Text = mDiscoveredServer);
+                    LogToUI($"发现服务器: {mDiscoveredServer}");
+                }
+
+                // 只要有已保存的 IP 或者发现了服务器就自动连接
+                string ip = IPText.Text?.Trim();
+                if (!string.IsNullOrEmpty(ip))
+                {
+                    LogToUI($"自动连接 {ip} ...");
+                    BtnConnect_OnClick();
+                }
+                else
+                {
+                    LogToUI("等待服务器广播... (请确保 PC 端已启动)");
+                }
+
+                // 标记初始发现阶段完成，之后发现的服务器可自动连接
+                mDiscoveryInitialDone = true;
+            });
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    var log = $"[{DateTime.Now}] OnCreate Crash: {ex}";
+                    File.WriteAllText(Path.Combine(CacheDir.AbsolutePath, "crash.log"), log);
+                    RunOnUiThread(() =>
+                        new Android.App.AlertDialog.Builder(this)
+                            .SetTitle("崩溃")
+                            .SetMessage(ex.ToString())
+                            .SetPositiveButton("OK", (s, ev) => Finish())
+                            .Show());
+                }
+                catch
+                {
+                    // 二次崩溃无法恢复
+                }
+                throw; // 重新抛出以触发全局处理器
+            }
         }
 
 
-        //启动传感器
+        //启动传感器
+
         private void StartSensor(SensorType EnableSensorType)
         {
 
@@ -247,190 +396,105 @@ namespace WheelSimu
 
 
 
-        void Accelerometer_ReadingChanged(object sender, AccelerometerChangedEventArgs e)
-        {
-            var data = e.Reading;
-            // Process Acceleration X, Y, and Z
-
-            AcX1 = data.Acceleration.X;
-            AcY1 = data.Acceleration.Y;
-            AcZ1 = data.Acceleration.Z;
-            /*Reading: \r\n */
-            AccelerometerData1 = $" AcX: {AcX1.ToString("0.000")} \r\n AcY: {AcY1.ToString("0.000")} \r\n AcZ: {AcZ1.ToString("0.000")} ";
-
-        }
-
-
         private void SteerEnableSwitch_OnClick()
         {
-            string SendData;
-            int result;
-            byte[] bytes;
-
             try
             {
-
                 if (SteerEnableSwitch.Checked)
                 {
-                    if (SensorMode == 0 || SensorMode == 2)   //Xamarin
+                    steerEnabled = true;
+                    StartSensors();
+
+                    // 启动定时发送
+                    if (sendTimer == null)
                     {
-                        if (Accelerometer.IsMonitoring == false)
-                        {
-                            Accelerometer.Start(Speed);
-                        }
+                        sendTimer = new System.Threading.Timer(_ => SendControlData(), null, sendIntervalMs, sendIntervalMs);
                     }
-
-                    if (SensorMode == 1)   //Android.Hardware
+                    else
                     {
-                        StartSensor(Android.Hardware.SensorType.Gravity);
+                        sendTimer.Change(0, sendIntervalMs);
                     }
-                    if (SensorMode == 3)   //Android.Hardware
-                    {
-                        StartSensor(Android.Hardware.SensorType.Accelerometer);
-                        StartSensor(Android.Hardware.SensorType.LinearAcceleration);
-                    }
-
-                    ////^^^^^^^^^^^^^^^^^^^^DEBUG List^^^^^^^^^^^^^^^^^^^^^^^^^^
-                    //// 获取传感器管理器
-                    //SensorManager sensorManager = (SensorManager)GetSystemService(SensorService);
-
-                    //// 获取全部传感器列表
-                    //System.Collections.Generic.IList<Sensor> sensors = sensorManager.GetSensorList(SensorType.All);
-
-                    //String strLog = "";
-                    //int i = 0;
-                    //foreach (Sensor item in sensors)
-                    //{
-                    //    strLog += (++i + "-" + item.Name + "\r\n");
-                    //}
-                    //RunOnUiThread(() => textView3.Text = strLog);
-                    ////vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv   
-
                 }
                 else
                 {
-                    if (SensorMode == 0 || SensorMode == 2)   //Xamarin
-                    {
-                        if (Accelerometer.IsMonitoring == true)
-                        {
-                            Accelerometer.Stop();
-                        }
-                    }
-
-                    if (SensorMode == 1 || SensorMode == 3)   //Android.Hardware
-                    {
-                        mSensorManager.UnregisterListener(this);
-                    }
+                    steerEnabled = false;
+                    StopSensors();
+                    sendTimer?.Change(Timeout.Infinite, Timeout.Infinite);
                 }
-
-
-
-                while (SteerEnableSwitch.Checked)
-                {
-
-                    RunOnUiThread(() => textView5.Text = AccelerometerData1);
-                    RunOnUiThread(() => textView1.Text = AccelerometerData2);
-
-                    //sThrottle = Throttle.Pressed ? 1 : 0;
-                    //sBrake = Brake.Pressed ? 1 : 0;
-                    sThrottle = 100 - Throttle.Top * 100 / cntThrottle.Height;
-                    sBrake = 100 - Brake.Top * 100 / cntBrake.Height;
-                    sAngle = GetWheelData();
-                    //sClearAngle = btnClearAngle.Pressed ? 1 : 0;
-
-                    if (btnSet.Pressed)
-                    {
-                        sSet = -1;
-                    }
-                    else if (btnReset.Pressed)
-                    {
-                        sSet = 1;
-                    }
-                    else
-                    {
-                        sSet = 0;
-                    };
-
-                    if (btnSetSrd.Pressed)
-                    {
-                        sSetSR = -1;
-                    }
-                    else if (btnSetSru.Pressed)
-                    {
-                        sSetSR = 1;
-                    }
-                    else
-                    {
-                        sSetSR = 0;
-                    };
-
-
-                    //键盘控制
-                    if (btnGearUp.Pressed)
-                    {
-                        sGear = 1;
-                    }
-                    else if (btnGearDown.Pressed)
-                    {
-                        sGear = -1;
-                    }
-                    else
-                    {
-                        sGear = 0;
-                    }
-
-                    //vJoy
-                    if (btnGearUp.Pressed)
-                    {
-                        sGearUp = 1;
-                    }
-                    else
-                    {
-                        sGearUp = 0;
-                    }
-                    if (btnGearDown.Pressed)
-                    {
-                        sGearDn = 1;
-                    }
-                    else
-                    {
-                        sGearDn = 0;
-                    }
-
-                    SendData = "A=" + sAngle +
-                              ",T=" + sThrottle +
-                              ",B=" + sBrake +
-                              ",Gu=" + sGearUp +
-                              ",Gd=" + sGearDn +
-                              ",G=" + sGear +
-                              ",S=" + sSet +
-                              ",SR=" + sSetSR;
-                    //",C=" + sClearAngle;
-
-                    //if (sGear != 0) sGear = 0;
-                    RunOnUiThread(() => textView4.Text = $" B={sBrake} T={sThrottle} A={sAngle.ToString("0.0")}");
-
-                    if (IsConnected == true)
-                    {
-                        bytes = Encoding.Unicode.GetBytes(SendData + "0@");
-                        result = Sct[1].Send(bytes);
-                        //textView4.Text = result.ToString();
-                    }
-
-                    if (Throttle.Pressed == false) RunOnUiThread(() => sldThrottle.Close());
-                    if (Brake.Pressed == false) RunOnUiThread(() => sldBrake.Close());
-
-                    Thread.Sleep(2);
-                }
-
-
             }
-
             catch (Exception ex)
             {
                 RunOnUiThread(() => textView2.Text = ex.Message);
             }
+        }
 
+        private void StartSensors()
+        {
+            if (SensorMode == 1)
+                StartSensor(Android.Hardware.SensorType.Gravity);
+            if (SensorMode == 3)
+            {
+                StartSensor(Android.Hardware.SensorType.Accelerometer);
+                StartSensor(Android.Hardware.SensorType.LinearAcceleration);
+            }
+        }
+
+        private void StopSensors()
+        {
+            if (SensorMode == 1 || SensorMode == 3)
+            {
+                mSensorManager?.UnregisterListener(this);
+            }
+        }
+
+        private void SendControlData()
+        {
+            if (!steerEnabled) return;
+
+            try
+            {
+                double angle;
+                lock (sensorLock)
+                {
+                    angle = GetWheelData();
+                }
+
+                // 在UI线程完成所有状态读取和网络发送，避免竞态条件
+                RunOnUiThread(() => DoSend(angle));
+            }
+            catch (Exception ex)
+            {
+                RunOnUiThread(() => textView2.Text = ex.Message);
+            }
+        }
+
+        private void DoSend(double angle)
+        {
+            sThrottle = (int)gaugeThrottle.Progress;
+            sBrake = (int)gaugeBrake.Progress;
+            sClutch = (int)gaugeClutch.Progress;
+            sHandbrake = HandbrakeSwitch.Checked ? 1 : 0;
+
+            sSet = btnSet.Pressed ? -1 : (btnReset.Pressed ? 1 : 0);
+            sSetSR = btnSetSrd.Pressed ? -1 : (btnSetSru.Pressed ? 1 : 0);
+            sGear = btnGearUp.Pressed ? 1 : (btnGearDown.Pressed ? -1 : 0);
+            sGearUp = btnGearUp.Pressed ? 1 : 0;
+            sGearDn = btnGearDown.Pressed ? 1 : 0;
+
+            textView5.Text = AccelerometerData1;
+            textView1.Text = AccelerometerData2;
+            textView4.Text = $"A={angle.ToString("0.0")}  B={sBrake} T={sThrottle} C={sClutch} HB={sHandbrake}";
+            tvThrottleVal.Text = $"{sThrottle}%";
+            tvBrakeVal.Text = $"{sBrake}%";
+            tvClutchVal.Text = $"{sClutch}%";
+            steeringWheel.Angle = (float)angle;
+
+            if (IsConnected)
+            {
+                string sendData = $"A={angle},T={sThrottle},B={sBrake},C={sClutch},Gu={sGearUp},Gd={sGearDn},G={sGear},S={sSet},SR={sSetSR},H={sHandbrake}";
+                byte[] bytes = Encoding.UTF8.GetBytes(sendData + "@");
+                try { Sct[1]?.Send(bytes); } catch { IsConnected = false; OnConnectionLost(); }
+            }
         }
 
         private double GetWheelData()
@@ -476,7 +540,8 @@ namespace WheelSimu
             }
             y -= OffSet * (90 - Math.Abs(y)) / 90;
 
-            if (TmpX > 0 && AcX1 < 0) //朝向由上变为下
+            if (TmpX > 0 && AcX1 < 0) //朝向由上变为下
+
             {
                 if (y < 0) //左转
                 {
@@ -487,7 +552,8 @@ namespace WheelSimu
                     Hp += 1;
                 }
             }
-            else if (TmpX < 0 && AcX1 > 0) //朝向由下变为上
+            else if (TmpX < 0 && AcX1 > 0) //朝向由下变为上
+
             {
                 if (y < 0) //右转
                 {
@@ -499,7 +565,8 @@ namespace WheelSimu
                 }
             }
 
-            //限制转向范围为900度
+            //限制转向范围为900度
+
             //if (Hp > 2) Hp = 2;
             //if (Hp < -2) Hp = -2;
 
@@ -519,68 +586,58 @@ namespace WheelSimu
             return data;
         }
 
+        private void BtnNetMode_OnClick()
+        {
+            // 循环切换: TCP → UDP → 蓝牙 → TCP
+            mConnectMode = (mConnectMode + 1) % 3;
+            string[] modes = { "TCP", "UDP", "蓝牙" };
+            btnNetMode.Text = modes[mConnectMode];
+        }
+
         private void BtnConnect_OnClick()
         {
             try
             {
-
-                if (btnConnect.Text == "连接")
+                if (!mAutoReconnect)
                 {
-                    RunOnUiThread(() => textView2.Text = "Connecting...");
+                    // === 打开自动重连 ===
+                    mAutoReconnect = true;
+                    RunOnUiThread(() => btnConnect.Text = "重连: 开");
                     RunOnUiThread(() => btnConnect.Enabled = false);
+                    RunOnUiThread(() => textView2.Text = "自动连接中...");
 
-                    IPAddress TmpIPAddress = new IPAddress(0);
-                    WifiManager wifi = (WifiManager)GetSystemService(WifiService);
-                    WifiInfo info = wifi.ConnectionInfo;
+                    // 有 IP 就立即尝试连接
+                    string ip = IPText.Text?.Trim();
+                    if (string.IsNullOrEmpty(ip))
+                    {
+                        RunOnUiThread(() => textView3.Text = "等待服务器广播...");
+                        RunOnUiThread(() => btnConnect.Enabled = true);
+                        return;
+                    }
 
-#pragma warning disable CS0618 // Type or member is obsolete
-                    TmpIPAddress.Address = info.IpAddress;
-#pragma warning restore CS0618 // Type or member is obsolete
-                    IPData[1].IP = TmpIPAddress.ToString();
-
-                    //}
-
-
-                    //IPData[1].IP = Dns.GetHostAddresses(strHostName).GetValue(0).ToString();
-                    //IPData[1].Port = Core.CommonCode.GetPort(IPData[1].IP, 1, TryTimes);
-                    IPData[1].Port = Core.CommonCode.GetPort(TryTimes);
-                    IPData[0].IP = IPText.Text;
-                    IPData[0].Port = Core.CommonCode.GetPort(TryTimes);
-
-
-                    RunOnUiThread(() => textView4.Text = "Connecting ...");
-                    RunOnUiThread(() => textView5.Text = $"{AddressFamily.InterNetwork}, {SocketType.Stream},{ System.Net.Sockets.ProtocolType.Tcp}");
-
-                    Sct[1] = new Socket(AddressFamily.InterNetwork, SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp); //使用TCP协议
-
-                    RunOnUiThread(() => textView4.Text = "Connecting ......");
-                    IPEndPoint LocalEndPoint = new IPEndPoint(IPAddress.Parse(IPData[1].IP), IPData[1].Port); // 指定IP和Port (应该是本机IP)
-                    IPEndPoint RemoteEndPoint = new IPEndPoint(IPAddress.Parse(IPData[0].IP), IPData[0].Port);
-
-                    RunOnUiThread(() => textView4.Text = "Connecting .........");
-                    Sct[1].Bind(LocalEndPoint);  // 绑定到该Socket
-
-                    RunOnUiThread(() => textView4.Text = "Connecting ............");
-                    Sct[1].Connect(RemoteEndPoint);
-
-                    RunOnUiThread(() => textView3.Text = "Connected");
-                    IsConnected = true;
-                    RunOnUiThread(() => btnConnect.Text = "关闭连接");
-                    RunOnUiThread(() => btnConnect.Enabled = true);
+                    DoConnect(ip);
                 }
-                else if (btnConnect.Text == "关闭连接")
+                else if (IsConnected)
                 {
+                    // === 关闭连接（不禁用自动重连，只是断开） ===
                     RunOnUiThread(() => btnConnect.Enabled = false);
-
-                    Sct[1].Close();
-
+                    Sct[1]?.Close();
                     IsConnected = false;
-                    RunOnUiThread(() => btnConnect.Text = "连接");
+                    RunOnUiThread(() => textView3.Text = "已断开");
                     RunOnUiThread(() => btnConnect.Enabled = true);
                 }
-
-
-
+                else
+                {
+                    // === 手动连接（自动重连已开但未连接） ===
+                    string ip = IPText.Text?.Trim();
+                    if (string.IsNullOrEmpty(ip))
+                    {
+                        RunOnUiThread(() => textView3.Text = "请先输入服务器IP");
+                        return;
+                    }
+                    RunOnUiThread(() => btnConnect.Enabled = false);
+                    DoConnect(ip);
+                }
             }
             catch (Exception ex)
             {
@@ -590,7 +647,94 @@ namespace WheelSimu
                 $"RemoteIP={IPData[0].IP}:{IPData[0].Port}");
                 RunOnUiThread(() => btnConnect.Enabled = true);
                 TryTimes += 1;
+
+                if (mAutoReconnect)
+                    ScheduleReconnect();
             }
+        }
+
+        private void DoConnect(string rawText)
+        {
+            // 获取手机本机WiFi IP (多种方式兜底)
+            string localIp = null;
+            try
+            {
+                WifiManager wifi = (WifiManager)GetSystemService(WifiService);
+                WifiInfo info = wifi.ConnectionInfo;
+                int ipInt = info.IpAddress;
+                localIp = $"{(ipInt & 0xFF)}.{((ipInt >> 8) & 0xFF)}.{((ipInt >> 16) & 0xFF)}.{((ipInt >> 24) & 0xFF)}";
+            }
+            catch { }
+
+            if (string.IsNullOrEmpty(localIp) || localIp.StartsWith("0."))
+            {
+                var host = Dns.GetHostEntry(Dns.GetHostName());
+                localIp = host.AddressList
+                    .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork && !a.ToString().StartsWith("127."))
+                    ?.ToString() ?? "0.0.0.0";
+            }
+            IPData[1].IP = localIp;
+            IPData[1].Port = 5050;
+
+            int colonIdx = rawText.LastIndexOf(':');
+            if (colonIdx > 0)
+            {
+                IPData[0].IP = rawText.Substring(0, colonIdx);
+                if (int.TryParse(rawText.Substring(colonIdx + 1), out int parsedPort) && parsedPort > 0 && parsedPort <= 65535)
+                    IPData[0].Port = parsedPort;
+                else
+                    IPData[0].Port = Core.CommonCode.GetPort(TryTimes);
+            }
+            else
+            {
+                IPData[0].IP = rawText;
+                IPData[0].Port = Core.CommonCode.GetPort(TryTimes);
+            }
+
+            // 保存IP
+            var prefs = GetSharedPreferences("WheelSimuPrefs", FileCreationMode.Private);
+            var editor = prefs.Edit();
+            editor.PutString("LastIP", IPText.Text);
+            editor.Commit();
+
+            RunOnUiThread(() => textView4.Text = "Connecting ...");
+            string[] modeLabels = { "TCP", "UDP", "蓝牙" };
+            RunOnUiThread(() => textView5.Text = modeLabels[mConnectMode]);
+
+            if (mConnectMode == 2)
+                Sct[1] = new Socket(AddressFamily.InterNetwork, SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
+            else if (mConnectMode == 1)
+                Sct[1] = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+            else
+                Sct[1] = new Socket(AddressFamily.InterNetwork, SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
+
+            Sct[1].SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+
+            RunOnUiThread(() => textView4.Text = "Connecting ......");
+            IPEndPoint RemoteEndPoint = new IPEndPoint(IPAddress.Parse(IPData[0].IP), IPData[0].Port);
+            RunOnUiThread(() => textView2.Text = $"→ {IPData[0].IP}:{IPData[0].Port}");
+
+            if (mConnectMode == 1)
+            {
+                Sct[1].Bind(new IPEndPoint(IPAddress.Any, 5050));
+                Sct[1].Connect(RemoteEndPoint);
+            }
+            else
+            {
+                var connectTask = Task.Run(() => Sct[1].Connect(RemoteEndPoint));
+                if (!connectTask.Wait(5000))
+                {
+                    Sct[1].Close();
+                    Sct[1].Dispose();
+                    throw new TimeoutException("连接超时 (" + IPData[0].IP + ":" + IPData[0].Port + ")");
+                }
+            }
+
+            RunOnUiThread(() => textView3.Text = "Connected");
+            IsConnected = true;
+            CancelReconnect();
+            RunOnUiThread(() => btnConnect.Text = "重连: 开");
+            RunOnUiThread(() => btnConnect.Enabled = true);
         }
 
         private void BtnClearAngle_OnClick()
@@ -618,6 +762,186 @@ namespace WheelSimu
             }
         }
 
+        protected override void OnResume()
+        {
+            base.OnResume();
+            if (steerEnabled)
+            {
+                StartSensors();
+                sendTimer?.Change(0, sendIntervalMs);
+            }
+        }
+
+        protected override void OnPause()
+        {
+            base.OnPause();
+            sendTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+            StopSensors();
+        }
+
+        protected override void OnDestroy()
+        {
+            base.OnDestroy();
+            CancelDiscovery();
+            CancelReconnect();
+            mAutoReconnect = false;
+            sendTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+            sendTimer?.Dispose();
+            sendTimer = null;
+            StopSensors();
+            mSensorManager?.UnregisterListener(this);
+
+            foreach (var socket in Sct)
+            {
+                if (socket != null && socket.Connected)
+                {
+                    try { socket.Shutdown(SocketShutdown.Both); } catch { }
+                    socket.Close();
+                    socket.Dispose();
+                }
+            }
+        }
+
+        // ==================== 辅助 ====================
+        private void LogToUI(string msg)
+        {
+            RunOnUiThread(() => textView3.Text = msg);
+        }
+
+        // ==================== UDP 服务发现 ====================
+        private volatile bool mDiscoveryInitialDone = false;
+
+        private void StartDiscovery()
+        {
+            CancelDiscovery();
+            mDiscoveryInitialDone = false;
+            mDiscoverCts = new CancellationTokenSource();
+            var ct = mDiscoverCts.Token;
+
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                UdpClient udp = null;
+                try
+                {
+                    udp = new UdpClient(DISCOVERY_PORT);
+                    udp.Client.ReceiveTimeout = 1000;
+
+                    while (!ct.IsCancellationRequested)
+                    {
+                        try
+                        {
+                            IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0);
+                            byte[] data = udp.Receive(ref remoteEP);
+                            string msg = Encoding.UTF8.GetString(data);
+                            if (msg.StartsWith(DISCOVERY_MAGIC + ":"))
+                            {
+                                var parts = msg.Split(':');
+                                if (parts.Length >= 3)
+                                {
+                                    string server = parts[1] + ":" + parts[2];
+                                    if (server != mDiscoveredServer)
+                                    {
+                                        mDiscoveredServer = server;
+                                        // 初始发现阶段：只填充 IPText，不做连接（由 Startup 逻辑统一处理）
+                                        if (!mDiscoveryInitialDone)
+                                        {
+                                            RunOnUiThread(() =>
+                                            {
+                                                if (string.IsNullOrEmpty(IPText.Text?.Trim()))
+                                                    IPText.Text = server;
+                                            });
+                                        }
+                                        // 之后发现的服务器：自动连接（用于服务器切换场景）
+                                        else if (!IsConnected && mAutoReconnect)
+                                        {
+                                            RunOnUiThread(() =>
+                                            {
+                                                IPText.Text = server;
+                                                textView3.Text = $"发现服务器: {server}";
+                                                if (!IsConnected && mAutoReconnect)
+                                                {
+                                                    btnConnect.Enabled = false;
+                                                    BtnConnect_OnClick();
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch (SocketException) { continue; }
+                        catch { break; }
+                    }
+                }
+                catch { }
+                finally
+                {
+                    try { udp?.Close(); } catch { }
+                }
+            });
+        }
+
+        private void CancelDiscovery()
+        {
+            if (mDiscoverCts != null)
+            {
+                try { mDiscoverCts.Cancel(); mDiscoverCts.Dispose(); } catch { }
+                mDiscoverCts = null;
+            }
+        }
+
+        // ==================== 自动重连 ====================
+        private System.Threading.Timer mReconnectTimer;
+
+        private void OnConnectionLost()
+        {
+            if (!mAutoReconnect) return;
+
+            RunOnUiThread(() =>
+            {
+                textView3.Text = "连接已断开，稍后自动重连...";
+                btnConnect.Enabled = false;
+            });
+
+            // 3秒后尝试重连
+            ScheduleReconnect();
+        }
+
+        private void ScheduleReconnect()
+        {
+            CancelReconnect();
+            mReconnectTimer = new System.Threading.Timer(_ =>
+            {
+                RunOnUiThread(() =>
+                {
+                    if (IsConnected) { CancelReconnect(); return; }
+                    if (!mAutoReconnect) { CancelReconnect(); return; }
+                    textView3.Text = $"自动重连中...";
+                    btnConnect.Enabled = false;
+                });
+
+                // 给UI线程一点时间更新状态
+                Thread.Sleep(100);
+
+                // 在UI线程上执行重连
+                RunOnUiThread(() =>
+                {
+                    if (!IsConnected && mAutoReconnect)
+                    {
+                        try { BtnConnect_OnClick(); } catch { }
+                    }
+                });
+            }, null, 3000, Timeout.Infinite);
+        }
+
+        private void CancelReconnect()
+        {
+            if (mReconnectTimer != null)
+            {
+                try { mReconnectTimer.Dispose(); } catch { }
+                mReconnectTimer = null;
+            }
+        }
 
     }
 
